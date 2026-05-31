@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from functools import lru_cache
 import html
 import re
 import sys
@@ -12,6 +13,8 @@ from typing import Dict, Iterable, List, Sequence, Set, Tuple, TypeAlias
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 
+from pypinyin import Style, lazy_pinyin
+
 XML_DECLARATION = '<?xml version="1.0" encoding="UTF-8"?>'
 PREFERRED_ATTR_ORDER: Sequence[str] = ("zh_cn", "zh_tw", "jp", "keyword", "tmdb_id")
 SUSPICIOUS_ESCAPE_RE = re.compile(
@@ -19,9 +22,20 @@ SUSPICIOUS_ESCAPE_RE = re.compile(
 )
 DIGIT_SPLIT_RE = re.compile(r"(\d+)")
 
-NaturalChunk: TypeAlias = Tuple[int, int | str]
+EncodedTextPart: TypeAlias = Tuple[int, ...]
+TextCharKey: TypeAlias = Tuple[int, EncodedTextPart, int]
+TextKey: TypeAlias = Tuple[TextCharKey, ...]
+NaturalChunk: TypeAlias = Tuple[int, int | TextKey]
 NaturalKey: TypeAlias = Tuple[NaturalChunk, ...]
-SortKey: TypeAlias = Tuple[NaturalKey, NaturalKey, NaturalKey, NaturalKey, NaturalKey, NaturalKey]
+FieldSortKey: TypeAlias = Tuple[int, NaturalKey]
+SortKey: TypeAlias = Tuple[
+    FieldSortKey,
+    FieldSortKey,
+    FieldSortKey,
+    FieldSortKey,
+    FieldSortKey,
+    NaturalKey,
+]
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,7 +71,7 @@ def normalize_newlines(text: str) -> str:
 
 
 def natural_key(value: str) -> NaturalKey:
-    parts = DIGIT_SPLIT_RE.split(value.casefold())
+    parts = DIGIT_SPLIT_RE.split(value)
     key: List[NaturalChunk] = []
     for part in parts:
         if part == "":
@@ -65,7 +79,95 @@ def natural_key(value: str) -> NaturalKey:
         if part.isdigit():
             key.append((0, int(part)))
         else:
-            key.append((1, part))
+            key.append((1, text_key(part)))
+    return tuple(key)
+
+
+def is_cjk_han(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x3400 <= code <= 0x4DBF
+        or 0x4E00 <= code <= 0x9FFF
+        or 0xF900 <= code <= 0xFAFF
+        or 0x20000 <= code <= 0x2A6DF
+        or 0x2A700 <= code <= 0x2B73F
+        or 0x2B740 <= code <= 0x2B81F
+        or 0x2B820 <= code <= 0x2CEAF
+        or 0x2CEB0 <= code <= 0x2EBEF
+        or 0x30000 <= code <= 0x3134F
+    )
+
+
+def is_japanese_kana(char: str) -> bool:
+    code = ord(char)
+    return (
+        0x3040 <= code <= 0x309F
+        or 0x30A0 <= code <= 0x30FF
+        or 0x31F0 <= code <= 0x31FF
+        or 0xFF66 <= code <= 0xFF9F
+    )
+
+
+def script_bucket_for_char(char: str) -> int:
+    if is_cjk_han(char):
+        return 0
+    if ("a" <= char <= "z") or ("A" <= char <= "Z"):
+        return 1
+    if is_japanese_kana(char):
+        return 2
+    return 3
+
+
+def script_bucket_for_text(value: str) -> int:
+    stripped = value.strip()
+    if not stripped:
+        return 3
+
+    # Ignore leading punctuation/symbols so entries like "【あいちゃん" follow Japanese order.
+    for char in stripped:
+        if char.isspace() or not char.isalnum():
+            continue
+        return script_bucket_for_char(char)
+
+    for char in stripped:
+        if not char.isspace():
+            return script_bucket_for_char(char)
+
+    return 3
+
+
+def gbk_han_fallback_key(char: str) -> EncodedTextPart:
+    try:
+        encoded = char.encode("gbk")
+        return (1, *encoded)
+    except UnicodeEncodeError:
+        return (2, ord(char))
+
+
+@lru_cache(maxsize=None)
+def han_order_key(char: str) -> EncodedTextPart:
+    # Use pinyin for Han ordering so Chinese block starts from a/阿-like order.
+    py = "".join(lazy_pinyin(char, style=Style.NORMAL, strict=False, errors="default"))
+    if py and py != char:
+        ascii_bytes = py.casefold().encode("ascii", errors="ignore")
+        if ascii_bytes:
+            # Add a separator so "a" sorts before "ai".
+            return (0, *ascii_bytes, -1, ord(char))
+
+    # Fallback for unknown/ext chars.
+    return gbk_han_fallback_key(char)
+
+
+def text_key(value: str) -> TextKey:
+    key: List[TextCharKey] = []
+    for char in value:
+        if ("a" <= char <= "z") or ("A" <= char <= "Z"):
+            # Enforce aA-bB-...-zZ order for ASCII letters.
+            key.append((0, (ord(char.lower()),), 0 if char.islower() else 1))
+        elif is_cjk_han(char):
+            key.append((1, han_order_key(char), 0))
+        else:
+            key.append((2, (ord(char),), 0))
     return tuple(key)
 
 
@@ -106,11 +208,11 @@ def render_entry(attributes: Dict[str, str]) -> str:
 
 def sort_key_for_entry(attributes: Dict[str, str], rendered_line: str) -> SortKey:
     return (
-        natural_key(attributes.get("zh_cn", "")),
-        natural_key(attributes.get("zh_tw", "")),
-        natural_key(attributes.get("jp", "")),
-        natural_key(attributes.get("keyword", "")),
-        natural_key(attributes.get("tmdb_id", "")),
+        (script_bucket_for_text(attributes.get("zh_cn", "")), natural_key(attributes.get("zh_cn", ""))),
+        (script_bucket_for_text(attributes.get("zh_tw", "")), natural_key(attributes.get("zh_tw", ""))),
+        (script_bucket_for_text(attributes.get("jp", "")), natural_key(attributes.get("jp", ""))),
+        (script_bucket_for_text(attributes.get("keyword", "")), natural_key(attributes.get("keyword", ""))),
+        (script_bucket_for_text(attributes.get("tmdb_id", "")), natural_key(attributes.get("tmdb_id", ""))),
         natural_key(rendered_line),
     )
 

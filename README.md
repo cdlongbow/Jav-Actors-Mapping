@@ -55,6 +55,7 @@
 提交前建议先执行：
 
 ```bash
+python -m pip install pypinyin
 python scripts/format_actor_mapping.py --check actor-mapping.xml
 ```
 
