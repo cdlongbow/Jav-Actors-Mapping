@@ -8,7 +8,7 @@ import html
 import re
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, List, Sequence, Tuple
+from typing import Dict, Iterable, List, Sequence, Set, Tuple, TypeAlias
 import xml.etree.ElementTree as ET
 from xml.sax.saxutils import escape as xml_escape
 
@@ -18,6 +18,10 @@ SUSPICIOUS_ESCAPE_RE = re.compile(
     r"(\\u[0-9a-fA-F]{4}|\\x[0-9a-fA-F]{2}|\\[nrtfv]|&amp;(?:amp|lt|gt|quot|apos);|&#x[0-9a-fA-F]+;|&#\d+;)"
 )
 DIGIT_SPLIT_RE = re.compile(r"(\d+)")
+
+NaturalChunk: TypeAlias = Tuple[int, int | str]
+NaturalKey: TypeAlias = Tuple[NaturalChunk, ...]
+SortKey: TypeAlias = Tuple[NaturalKey, NaturalKey, NaturalKey, NaturalKey, NaturalKey, NaturalKey]
 
 
 def parse_args() -> argparse.Namespace:
@@ -52,9 +56,9 @@ def normalize_newlines(text: str) -> str:
     return normalized
 
 
-def natural_key(value: str) -> Tuple[Tuple[int, object], ...]:
+def natural_key(value: str) -> NaturalKey:
     parts = DIGIT_SPLIT_RE.split(value.casefold())
-    key: List[Tuple[int, object]] = []
+    key: List[NaturalChunk] = []
     for part in parts:
         if part == "":
             continue
@@ -67,7 +71,7 @@ def natural_key(value: str) -> Tuple[Tuple[int, object], ...]:
 
 def ordered_attributes(attributes: Dict[str, str]) -> List[Tuple[str, str]]:
     ordered: List[Tuple[str, str]] = []
-    consumed = set()
+    consumed: Set[str] = set()
 
     for attr_name in PREFERRED_ATTR_ORDER:
         if attr_name in attributes:
@@ -100,7 +104,7 @@ def render_entry(attributes: Dict[str, str]) -> str:
     return f"  <a {' '.join(parts)} />"
 
 
-def sort_key_for_entry(attributes: Dict[str, str], rendered_line: str) -> Tuple[Tuple[Tuple[int, object], ...], ...]:
+def sort_key_for_entry(attributes: Dict[str, str], rendered_line: str) -> SortKey:
     return (
         natural_key(attributes.get("zh_cn", "")),
         natural_key(attributes.get("zh_tw", "")),
@@ -120,7 +124,7 @@ def build_normalized_xml(raw_xml: str) -> str:
     if root.tag != "actor":
         raise ValueError(f"Root element must be <actor>, got <{root.tag}>.")
 
-    rendered_entries: List[Tuple[Tuple[Tuple[int, object], ...], str]] = []
+    rendered_entries: List[Tuple[SortKey, str]] = []
 
     for child in list(root):
         if child.tag != "a":
