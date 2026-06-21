@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Normalize actor-mapping.xml by sorting <a> entries and checking escaped strings. AVdb 1.0.0"""
+"""Normalize actor-mapping.xml by sorting entries, blacklist, and escaped strings. AVdb 1.0.0"""
 
 from __future__ import annotations
 import argparse
@@ -207,7 +207,53 @@ def render_entry(attributes: Dict[str, str]) -> str:
         escaped = xml_escape(normalized, {'"': "&quot;"})
         parts.append(f'{key}="{escaped}"')
 
-    return f"  <a {' '.join(parts)} />"
+    return f"    <a {' '.join(parts)} />"
+
+
+def split_blacklist_values(value: str) -> List[str]:
+    return [item.strip() for item in re.split(r"[\n,;|]+", value or "") if item.strip()]
+
+
+def collect_blacklist_values(root: ET.Element) -> List[str]:
+    values: List[str] = []
+    seen: Set[str] = set()
+    for blacklist_node in root.findall(".//actor-blacklist"):
+        raw_values = split_blacklist_values(blacklist_node.text or "")
+        for child in list(blacklist_node):
+            raw_values.extend(
+                split_blacklist_values(
+                    child.text or child.attrib.get("name") or child.attrib.get("value") or ""
+                )
+            )
+        for value in raw_values:
+            normalized = normalize_attribute_value(value)
+            if not normalized:
+                continue
+            key = normalized.casefold()
+            if key in seen:
+                continue
+            seen.add(key)
+            values.append(normalized)
+    return values
+
+
+def render_blacklist(values: List[str]) -> List[str]:
+    lines = ["  <actor-blacklist>"]
+    for value in sorted(values, key=natural_key):
+        lines.append(f"    {xml_escape(value)}")
+    lines.append("  </actor-blacklist>")
+    return lines
+
+
+def get_actor_node(root: ET.Element) -> ET.Element:
+    if root.tag == "actor":
+        return root
+    if root.tag != "actor-mapping":
+        raise ValueError(f"Root element must be <actor> or <actor-mapping>, got <{root.tag}>.")
+    actor_nodes = [child for child in list(root) if child.tag == "actor"]
+    if len(actor_nodes) != 1:
+        raise ValueError(f"<actor-mapping> must contain exactly one <actor> child, got {len(actor_nodes)}.")
+    return actor_nodes[0]
 
 
 def load_person_ids(file_path: Path) -> List[Dict[str, str]]:
@@ -331,17 +377,17 @@ def build_normalized_xml(raw_xml: str, person_ids: List[Dict[str, str]] | None =
     except ET.ParseError as exc:
         raise ValueError(f"Invalid XML: {exc}") from exc
 
-    if root.tag != "actor":
-        raise ValueError(f"Root element must be <actor>, got <{root.tag}>.")
+    actor_node = get_actor_node(root)
+    blacklist_values = collect_blacklist_values(root)
 
     if person_ids is not None:
-        merge_person_ids(root, person_ids)
+        merge_person_ids(actor_node, person_ids)
 
-    validate_unique_tmdb_ids(root)
+    validate_unique_tmdb_ids(actor_node)
 
     rendered_entries: List[Tuple[SortKey, str]] = []
 
-    for child in list(root):
+    for child in list(actor_node):
         if child.tag != "a":
             raise ValueError(f"Only <a> children are supported, got <{child.tag}>.")
 
@@ -351,9 +397,11 @@ def build_normalized_xml(raw_xml: str, person_ids: List[Dict[str, str]] | None =
 
     rendered_entries.sort(key=lambda item: item[0])
 
-    lines = [XML_DECLARATION, "<actor>"]
+    lines = [XML_DECLARATION, "<actor-mapping>", "  <actor>"]
     lines.extend(line for _, line in rendered_entries)
-    lines.append("</actor>")
+    lines.append("  </actor>")
+    lines.extend(render_blacklist(blacklist_values))
+    lines.append("</actor-mapping>")
     return "\n".join(lines) + "\n"
 
 
