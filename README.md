@@ -101,7 +101,7 @@ python scripts/format_actor_mapping.py --write actor-mapping.xml
 1. 文件名固定为 actor-mapping.xml。
 2. 文件编码使用 UTF-8。
 3. 保留 XML 头声明：<?xml version="1.0" encoding="UTF-8"?>。
-4. 根节点保持为 actor。
+4. 根节点保持为 actor-mapping
 
 ### 2. 条目结构要求
 
